@@ -3,6 +3,9 @@ import { defineConfig } from 'wxt';
 export default defineConfig({
   srcDir: 'src-wxt',
   outDir: 'build',
+  suppressWarnings: {
+    firefoxDataCollection: true,
+  },
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'Resources Saver',

@@ -1,7 +1,7 @@
-# 📦 Resources Saver - Premium Web Resource Downloader
+# 📦 Resources Saver
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/NortonBen/Resources-Saver/main/icon.svg" width="128" alt="Resources Saver Logo">
+  <img src="https://raw.githubusercontent.com/NortonBen/Resources-Saver/main/public/icon-master.png" width="128" alt="Resources Saver Logo">
   <p><i>The ultimate web asset extraction tool. Save everything while maintaining original folder structures.</i></p>
   
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)

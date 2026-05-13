@@ -39,7 +39,7 @@ Resources Saver is built on a cutting-edge foundation:
 
 ### Installation
 
-For users, the easiest way to get started is by installing from the **[Chrome Web Store](https://chrome.google.com/)**.
+For users, the easiest way to get started is by installing from the **[Chrome Web Store](https://chromewebstore.google.com/detail/gcepfmdnaiddlilfojjmikagakagcjdd)**.
 
 ### For Developers
 

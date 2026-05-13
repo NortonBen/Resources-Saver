@@ -73,6 +73,9 @@ If you wish to build from source or contribute:
 ![Sidepanel Dashboard](./image2.png)
 *Modern Side Panel interface with an intuitive dashboard and one-click download.*
 
+![Promotional Banner](./promo.png)
+*Professional promotional banner for the browser extension store.*
+
 ---
 
 ## 📜 Version History

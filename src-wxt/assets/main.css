@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #1677ff;
+  --color-primary-hover: #4096ff;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 overflow-hidden;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+    'Noto Color Emoji';
+}
+
+/* Ant Design Overrides for Small Screens */
+.ant-layout-sider-collapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+}
+
+.responsive-layout .ant-table-wrapper {
+  @apply shadow-sm bg-white rounded-xl overflow-hidden;
+}
+
+.ant-table-cell {
+  @apply py-3 px-4;
+}
+
+@media (max-width: 640px) {
+  .ant-table-thead > tr > th {
+    @apply py-2 px-2 text-xs;
+  }
+  .ant-table-tbody > tr > td {
+    @apply py-2 px-2 text-xs;
+  }
+}
+
+.main-sider .ant-typography {
+  @apply text-slate-700;
+}
+
+.main-sider .ant-divider {
+  @apply my-4 border-slate-100;
+}

@@ -10,8 +10,8 @@ export default defineConfig({
   manifest: {
     name: 'Resources Saver',
     short_name: 'Resources Saver',
-    version: '0.0.1',
-    version_name: '0.0.1',
+    version: '0.0.2',
+    version_name: '0.0.2',
     description: "Save all of a webpage's files while retaining folder structure.",
     offline_enabled: true,
     minimum_chrome_version: '88',

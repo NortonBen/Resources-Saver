@@ -1,7 +1,7 @@
 {
   "name": "Resources-Saver",
   "description": "Save all of a webpage's files while retaining folder structure.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "scripts": {

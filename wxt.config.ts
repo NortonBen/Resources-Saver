@@ -15,7 +15,16 @@ export default defineConfig({
     description: "Save all of a webpage's files while retaining folder structure.",
     offline_enabled: true,
     minimum_chrome_version: '88',
-    permissions: ['tabs', 'downloads', 'downloads.shelf', 'activeTab', 'storage', 'sidePanel'],
+    permissions: [
+      'tabs',
+      'downloads',
+      'downloads.shelf',
+      'activeTab',
+      'storage',
+      'sidePanel',
+      'scripting',
+      'webRequest',
+    ],
     host_permissions: ['http://*/*', 'https://*/*', 'ftp://*/*', 'file://*/*', '*://*/*'],
     devtools_page: 'entrypoints/devtools/index.html',
     side_panel: {

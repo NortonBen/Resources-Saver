@@ -38,7 +38,21 @@ import {
   FolderOpenOutlined
 } from '@ant-design/icons';
 import { logger } from './lib/logger';
-import { resolveURLToPath, cleanUrlForComparison } from './lib/resource-utils';
+import { resolveURLToPath, mimeTypeForDownload } from './lib/resource-utils';
+import {
+  type ResourceStatus,
+  statusFromHarEntry,
+  statusFromHttpCode,
+  harEntrySize,
+  probeContentHandler,
+} from './lib/resource-status';
+import {
+  loadResourceBytes,
+  decodeDevToolsContent,
+  uniquifyPath,
+  downloadBlob,
+  downloadUrl,
+} from './lib/download-resource';
 import JSZip from 'jszip';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github-dark.css';
@@ -51,8 +65,19 @@ interface Resource {
   url: string;
   type: string;
   size: number;
-  status: 'pending' | 'downloading' | 'success' | 'failed';
+  status: ResourceStatus;
   origin: 'static' | 'network';
+}
+
+function mimeTypeFromRequest(request: chrome.devtools.network.Request): string {
+  const mime = request.response?.content?.mimeType;
+  if (mime) return mime;
+  const url = request.request.url;
+  if (/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(url)) return 'image';
+  if (/\.json$/i.test(url)) return 'application/json';
+  if (/\.js$/i.test(url)) return 'application/javascript';
+  if (/\.css$/i.test(url)) return 'text/css';
+  return 'unknown';
 }
 
 // Store non-serializable getContent functions outside of React state
@@ -76,6 +101,53 @@ const DevToolsPanel = () => {
   const [selectedTreeKeys, setSelectedTreeKeys] = useState<string[]>([]);
   const [currentDomain, setCurrentDomain] = useState<string>('');
 
+  const updateResourceStatus = useCallback((url: string, status: ResourceStatus, patch?: Partial<Resource>) => {
+    setResources(prev =>
+      prev.map(r => (r.url === url ? { ...r, status, ...patch } : r))
+    );
+  }, []);
+
+  const probePendingStatuses = useCallback(async (list: Resource[]) => {
+    const pending = list.filter(r => r.status === 'pending');
+    if (pending.length === 0) return;
+
+    await Promise.all(
+      pending.map(async (res) => {
+        const handler = contentHandlers.get(res.url);
+        if (!handler) return;
+        const hasContent = await probeContentHandler(handler);
+        if (hasContent) {
+          updateResourceStatus(res.url, 'success');
+        }
+      })
+    );
+  }, [updateResourceStatus]);
+
+  const mergeHarEntries = useCallback((foundResources: Resource[], har: chrome.devtools.network.HARLog) => {
+    har.entries.forEach(entry => {
+      const url = entry.request.url;
+      if (url.startsWith('chrome-extension://')) return;
+
+      contentHandlers.set(url, entry.getContent.bind(entry));
+      const harStatus = statusFromHarEntry(entry);
+      const existing = foundResources.find(r => r.url === url);
+
+      if (existing) {
+        existing.status = harStatus;
+        existing.size = harEntrySize(entry) || existing.size;
+        if (harStatus !== 'pending') existing.origin = 'network';
+      } else {
+        foundResources.push({
+          url,
+          type: entry.response.content.mimeType || 'xhr',
+          size: harEntrySize(entry),
+          status: harStatus,
+          origin: 'network',
+        });
+      }
+    });
+  }, []);
+
   // Collect resources
   const refreshResources = useCallback(() => {
     setLoading(true);
@@ -95,32 +167,23 @@ const DevToolsPanel = () => {
         });
       });
       
+      const finishRefresh = (list: Resource[]) => {
+        setResources(list);
+        setLoading(false);
+        void probePendingStatuses(list);
+      };
+
       // 2. Get XHR if enabled (this requires HAR)
       if (xhrEnabled) {
         chrome.devtools.network.getHAR((har) => {
-          har.entries.forEach(entry => {
-            const url = entry.request.url;
-            if (url.startsWith('chrome-extension://')) return;
-            if (!foundResources.find(r => r.url === url)) {
-              contentHandlers.set(url, entry.getContent.bind(entry));
-              foundResources.push({
-                url,
-                type: entry.response.content.mimeType || 'xhr',
-                size: entry.response.content.size || 0,
-                status: 'pending',
-                origin: 'network',
-              });
-            }
-          });
-          setResources(foundResources);
-          setLoading(false);
+          mergeHarEntries(foundResources, har);
+          finishRefresh(foundResources);
         });
       } else {
-        setResources(foundResources);
-        setLoading(false);
+        finishRefresh(foundResources);
       }
     });
-  }, [xhrEnabled]);
+  }, [xhrEnabled, mergeHarEntries, probePendingStatuses]);
 
   useEffect(() => {
     refreshResources();
@@ -142,6 +205,46 @@ const DevToolsPanel = () => {
     };
 
     chrome.devtools.inspectedWindow.onResourceAdded.addListener(onResourceAdded);
+
+    const onRequestFinished = (request: chrome.devtools.network.Request) => {
+      const url = request.request.url;
+      if (url.startsWith('chrome-extension://')) return;
+
+      contentHandlers.set(url, request.getContent.bind(request));
+      const httpStatus = request.response?.status ?? 0;
+      const nextStatus = statusFromHttpCode(httpStatus);
+      const size = request.response?.content?.size ?? 0;
+      const type = mimeTypeFromRequest(request);
+
+      setResources(prev => {
+        const existing = prev.find(r => r.url === url);
+        if (existing) {
+          return prev.map(r =>
+            r.url === url
+              ? { ...r, status: nextStatus, size: size || r.size, type: type !== 'unknown' ? type : r.type, origin: 'network' }
+              : r
+          );
+        }
+        return [
+          ...prev,
+          {
+            url,
+            type,
+            size,
+            status: nextStatus,
+            origin: 'network',
+          },
+        ];
+      });
+
+      if (nextStatus === 'pending') {
+        void probeContentHandler(request.getContent.bind(request)).then(hasContent => {
+          if (hasContent) updateResourceStatus(url, 'success');
+        });
+      }
+    };
+
+    chrome.devtools.network.onRequestFinished.addListener(onRequestFinished);
     
     // Get current domain
     chrome.tabs.get(chrome.devtools.inspectedWindow.tabId, (tab) => {
@@ -152,8 +255,9 @@ const DevToolsPanel = () => {
 
     return () => {
       chrome.devtools.inspectedWindow.onResourceAdded.removeListener(onResourceAdded);
+      chrome.devtools.network.onRequestFinished.removeListener(onRequestFinished);
     };
-  }, [refreshResources]);
+  }, [refreshResources, updateResourceStatus]);
 
   // Memoize tree data to avoid expensive recalculations and potential cloning issues
   const treeData = useMemo(() => {
@@ -251,6 +355,62 @@ const DevToolsPanel = () => {
     });
   };
 
+  const saveResourceToDisk = useCallback(
+    async (res: Resource, zip: JSZip | null, usedPaths: Set<string>) => {
+      const resolved = resolveURLToPath(res.url, res.type);
+      const filePath = uniquifyPath(resolved.path, usedPaths);
+      const handler = contentHandlers.get(res.url);
+      const bytes = await loadResourceBytes(res.url, handler);
+
+      if (bytes) {
+        if (zip) {
+          zip.file(filePath, bytes.data);
+        } else {
+          await downloadBlob(
+            new Blob([bytes.data], { type: mimeTypeForDownload(res.url, res.type) }),
+            filePath
+          );
+        }
+        return true;
+      }
+
+      if (!zip) {
+        await downloadUrl(res.url, filePath);
+        return true;
+      }
+
+      return false;
+    },
+    []
+  );
+
+  const handleDownloadSingle = useCallback(
+    async (res: Resource, preview?: { content: string; encoding: string }) => {
+      try {
+        const resolved = resolveURLToPath(res.url, res.type);
+        const usedPaths = new Set<string>();
+
+        if (preview?.content) {
+          const bytes = decodeDevToolsContent(preview.content, preview.encoding);
+          await downloadBlob(
+            new Blob([bytes], { type: mimeTypeForDownload(res.url, res.type) }),
+            resolved.path
+          );
+          message.success('Download started');
+          return;
+        }
+
+        const saved = await saveResourceToDisk(res, null, usedPaths);
+        if (saved) message.success('Download started');
+        else message.error('Could not download this resource');
+      } catch (error) {
+        logger.error('Single download failed', error);
+        message.error('Download failed');
+      }
+    },
+    [saveResourceToDisk]
+  );
+
   const handleDownloadAll = async () => {
     setIsDownloading(true);
     setDownloadProgress(0);
@@ -265,70 +425,45 @@ const DevToolsPanel = () => {
 
     message.info(`Starting download of ${filtered.length} files...`);
 
-    // Download logic
-    let completedCount = 0;
     const zip = zipEnabled ? new JSZip() : null;
+    const usedPaths = new Set<string>();
+    let savedCount = 0;
+    let failedCount = 0;
+    let processed = 0;
 
     for (const res of filtered) {
+      updateResourceStatus(res.url, 'downloading');
       try {
-        const resolved = resolveURLToPath(res.url, res.type);
-        
-        const handler = contentHandlers.get(res.url);
-        if (!handler) {
-          completedCount++;
-          continue;
-        }
-
-        await new Promise<void>((resolve) => {
-          handler((content, encoding) => {
-            if (content) {
-              const data = encoding === 'base64' ? atob(content) : content;
-              if (zip) {
-                zip.file(resolved.path, data, { binary: encoding === 'base64' });
-              } else {
-                const blob = new Blob([data], { type: res.type });
-                const url = URL.createObjectURL(blob);
-                chrome.downloads.download({
-                  url: url,
-                  filename: resolved.path,
-                  conflictAction: 'overwrite',
-                  saveAs: false
-                }, () => {
-                  URL.revokeObjectURL(url);
-                });
-              }
-            } else if (!zip) {
-              // Fallback to direct URL download if content not available and not zipping
-              chrome.downloads.download({
-                url: res.url,
-                filename: resolved.path,
-                conflictAction: 'overwrite',
-                saveAs: false
-              });
-            }
-            resolve();
-          });
-        });
-
-        completedCount++;
-        setDownloadProgress(Math.round((completedCount / filtered.length) * 100));
+        const saved = await saveResourceToDisk(res, zip, usedPaths);
+        updateResourceStatus(res.url, saved ? 'success' : 'failed');
+        if (saved) savedCount++;
+        else failedCount++;
       } catch (error) {
         logger.error(`Failed to process ${res.url}`, error);
+        updateResourceStatus(res.url, 'failed');
+        failedCount++;
       }
+
+      processed++;
+      setDownloadProgress(Math.round((processed / filtered.length) * 100));
     }
 
     if (zip) {
-      const content = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(content);
-      chrome.downloads.download({
-        url: url,
-        filename: `${currentDomain || 'resources'}.zip`,
-        conflictAction: 'overwrite',
-        saveAs: false
-      }, () => URL.revokeObjectURL(url));
+      if (savedCount === 0) {
+        message.error('No files could be saved into the ZIP archive');
+      } else {
+        const content = await zip.generateAsync({ type: 'blob' });
+        await downloadBlob(content, `${currentDomain || 'resources'}.zip`);
+        message.success(`ZIP created with ${savedCount} files${failedCount ? ` (${failedCount} skipped)` : ''}`);
+      }
+    } else {
+      message.success(
+        failedCount
+          ? `Downloaded ${savedCount} files, ${failedCount} failed`
+          : `Successfully downloaded ${savedCount} files`
+      );
     }
 
-    message.success(zip ? 'ZIP archive created!' : `Successfully downloaded ${completedCount} files!`);
     setIsDownloading(false);
   };
 
@@ -365,9 +500,14 @@ const DevToolsPanel = () => {
       key: 'status',
       width: 90,
       responsive: ['md'],
-      render: (status: string) => (
-        <Badge status={status === 'success' ? 'success' : 'default'} text={status} />
-      ),
+      render: (status: ResourceStatus) => {
+        const badgeStatus =
+          status === 'success' ? 'success'
+          : status === 'failed' ? 'error'
+          : status === 'downloading' ? 'processing'
+          : 'default';
+        return <Badge status={badgeStatus} text={status} />;
+      },
     },
   ];
 
@@ -545,23 +685,7 @@ const DevToolsPanel = () => {
               <Tag color="blue">{selectedResource?.type}</Tag>
               <Button 
                 icon={<DownloadOutlined />} 
-                onClick={() => {
-                  if (selectedResource) {
-                    const resolved = resolveURLToPath(selectedResource.url, selectedResource.type);
-                    const handler = contentHandlers.get(selectedResource.url);
-                    if (handler) {
-                      handler((content, encoding) => {
-                        const data = encoding === 'base64' ? atob(content) : content;
-                        const blob = new Blob([data], { type: selectedResource.type });
-                        const url = URL.createObjectURL(blob);
-                        chrome.downloads.download({ url, filename: resolved.path });
-                      });
-                    } else {
-                      // Fallback to direct URL if handler missing
-                      chrome.downloads.download({ url: selectedResource.url, filename: resolved.path });
-                    }
-                  }
-                }}
+                onClick={() => selectedResource && handleDownloadSingle(selectedResource)}
               >
                 Download
               </Button>
@@ -599,15 +723,13 @@ const DevToolsPanel = () => {
                     size="small" 
                     type="primary"
                     icon={<DownloadOutlined />} 
-                    onClick={() => {
-                      if (selectedResource) {
-                        const resolved = resolveURLToPath(selectedResource.url, selectedResource.type);
-                        const data = previewEncoding === 'base64' ? atob(previewContent) : previewContent;
-                        const blob = new Blob([data], { type: selectedResource.type });
-                        const url = URL.createObjectURL(blob);
-                        chrome.downloads.download({ url, filename: resolved.path });
-                      }
-                    }}
+                    onClick={() =>
+                      selectedResource &&
+                      handleDownloadSingle(selectedResource, {
+                        content: previewContent,
+                        encoding: previewEncoding,
+                      })
+                    }
                   >
                     Download
                   </Button>

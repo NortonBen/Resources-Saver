@@ -45,7 +45,13 @@ import {
   ShareInternalOutlined,
   FolderOutlined
 } from '@ant-design/icons';
-import { resolveURLToPath } from '../../lib/resource-utils';
+import { resolveURLToPath, mimeTypeForDownload } from '../../lib/resource-utils';
+import {
+  loadResourceBytesForTab,
+  uniquifyPath,
+  downloadBlob,
+  downloadUrl,
+} from '../../lib/download-resource';
 import { logger, LogLevel } from '../../lib/logger';
 import JSZip from 'jszip';
 import hljs from 'highlight.js';
@@ -297,45 +303,69 @@ const SidePanel = () => {
       return;
     }
 
-    message.info(`Downloading ${filtered.length} resources...`);
-
-    let completed = 0;
-    for (const res of filtered) {
-      try {
-        let resolved = resolveURLToPath(res.url, res.type);
-        let finalPath = resolved.path;
-
-        // Apply group by type if enabled
-        if (settings.groupByType) {
-          const typeMap: Record<string, string> = {
-            'image': 'images',
-            'script': 'js',
-            'stylesheet': 'css',
-            'media': 'media',
-            'file': 'files'
-          };
-          const folder = typeMap[res.type] || 'others';
-          finalPath = `${folder}/${finalPath}`;
-        }
-
-        await chrome.downloads.download({
-          url: res.url,
-          filename: finalPath,
-          conflictAction: settings.overwriteFiles ? 'overwrite' : 'uniquify',
-          saveAs: false
-        });
-        
-        if (!settings.autoOpenShelf) {
-           chrome.downloads.setShelfEnabled(false);
-        }
-        completed++;
-        setDownloadProgress(Math.round((completed / filtered.length) * 100));
-      } catch (e) {
-        console.error('Download failed for', res.url, e);
-      }
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabId = tab?.id;
+    if (!tabId) {
+      message.error('No active tab found');
+      setIsDownloading(false);
+      return;
     }
 
-    message.success(`Downloaded ${completed} files successfully!`);
+    message.info(`Downloading ${filtered.length} resources...`);
+
+    const usedPaths = new Set<string>();
+    let savedCount = 0;
+    let failedCount = 0;
+    let processed = 0;
+
+    for (const res of filtered) {
+      try {
+        const resolved = resolveURLToPath(res.url, res.type);
+        let finalPath = resolved.path;
+
+        if (settings.groupByType) {
+          const typeMap: Record<string, string> = {
+            image: 'images',
+            script: 'js',
+            stylesheet: 'css',
+            media: 'media',
+            file: 'files',
+          };
+          const folder = typeMap[res.type] || 'others';
+          finalPath = `${folder}/${resolved.path}`;
+        }
+
+        finalPath = uniquifyPath(finalPath, usedPaths);
+
+        const bytes = await loadResourceBytesForTab(tabId, res.url);
+        if (bytes) {
+          await downloadBlob(
+            new Blob([bytes.data], { type: mimeTypeForDownload(res.url, res.type) }),
+            finalPath
+          );
+          savedCount++;
+        } else {
+          await downloadUrl(res.url, finalPath);
+          savedCount++;
+        }
+
+        if (!settings.autoOpenShelf) {
+          chrome.downloads.setShelfEnabled(false);
+        }
+      } catch (e) {
+        console.error('Download failed for', res.url, e);
+        failedCount++;
+      }
+
+      processed++;
+      setDownloadProgress(Math.round((processed / filtered.length) * 100));
+    }
+
+    message.success(
+      failedCount
+        ? `Downloaded ${savedCount} files, ${failedCount} failed`
+        : `Downloaded ${savedCount} files successfully`
+    );
     setIsDownloading(false);
   };
 
@@ -582,10 +612,26 @@ const SidePanel = () => {
             type="primary" 
             size="small" 
             icon={<DownloadOutlined />} 
-            onClick={() => {
-              if (selectedResource) {
-                const resolved = resolveURLToPath(selectedResource.url, selectedResource.type);
-                chrome.downloads.download({ url: selectedResource.url, filename: resolved.path });
+            onClick={async () => {
+              if (!selectedResource) return;
+              const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (!tab?.id) return;
+              const resolved = resolveURLToPath(selectedResource.url, selectedResource.type);
+              const bytes = await loadResourceBytesForTab(tab.id, selectedResource.url);
+              try {
+                if (bytes) {
+                  await downloadBlob(
+                    new Blob([bytes.data], {
+                      type: mimeTypeForDownload(selectedResource.url, selectedResource.type),
+                    }),
+                    resolved.path
+                  );
+                } else {
+                  await downloadUrl(selectedResource.url, resolved.path);
+                }
+                message.success('Download started');
+              } catch {
+                message.error('Download failed');
               }
             }}
           >

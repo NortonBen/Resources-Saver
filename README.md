@@ -65,6 +65,10 @@ If you wish to build from source or contribute:
    npm run build
    ```
 
+### Chrome Web Store submission
+
+Permission justification text for `scripting`, `webRequest`, and related APIs is in [docs/chrome-web-store-permissions.md](./docs/chrome-web-store-permissions.md) (ready to paste into the listing form).
+
 ## 📸 Interface Preview
 
 ![DevTools Integration](./image1.png)

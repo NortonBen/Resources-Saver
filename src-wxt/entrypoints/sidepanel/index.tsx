@@ -48,11 +48,13 @@ import {
   uniquifyPath,
   downloadBlob,
   downloadUrl,
+  base64ToUint8Array,
 } from '../../lib/download-resource';
 import { logger, LogLevel } from '../../lib/logger';
 import { useCaptureSession } from '../../lib/use-capture-session';
 import type { CaptureTaskKind, CapturedResource } from '../../lib/capture-messages';
 import { isRestrictedTabUrl } from '../../lib/capture-messages';
+import JSZip from 'jszip';
 import '../../assets/main.css';
 
 const { Header, Content, Footer } = Layout;
@@ -120,13 +122,15 @@ const SidePanel = () => {
   const [settings, setSettings] = useState({
     autoOpenShelf: true,
     overwriteFiles: true,
-    groupByType: false,
     debugMode: false,
+    zipEnabled: true,
   });
 
   React.useEffect(() => {
     chrome.storage.local.get(['settings'], (result) => {
-      if (result.settings) setSettings(result.settings);
+      if (result.settings) {
+        setSettings((prev) => ({ ...prev, ...result.settings }));
+      }
     });
   }, []);
 
@@ -261,6 +265,7 @@ const SidePanel = () => {
 
     message.info(`Downloading ${filtered.length} files...`);
 
+    const zip = settings.zipEnabled ? new JSZip() : null;
     const usedPaths = new Set<string>();
     let savedCount = 0;
     let failedCount = 0;
@@ -271,33 +276,49 @@ const SidePanel = () => {
         const resolved = resolveURLToPath(res.url, res.type);
         let finalPath = resolved.path;
 
-        if (settings.groupByType) {
-          const typeMap: Record<string, string> = {
-            image: 'images',
-            script: 'js',
-            stylesheet: 'css',
-            media: 'media',
-            file: 'files',
-          };
-          const folder = typeMap[res.type] || 'others';
-          finalPath = `${folder}/${resolved.path}`;
-        }
+
 
         finalPath = uniquifyPath(finalPath, usedPaths);
 
-        const bytes = await loadResourceBytesForTab(targetTabId, res.url);
-        if (bytes) {
-          await downloadBlob(
-            new Blob([bytes.data], { type: mimeTypeForDownload(res.url, res.type) }),
-            finalPath
-          );
-          savedCount++;
+        let bytes: { data: Uint8Array } | null = null;
+        if (res.url.startsWith('data:')) {
+          try {
+            const commaIndex = res.url.indexOf(',');
+            if (commaIndex !== -1) {
+              const dataPart = res.url.substring(commaIndex + 1);
+              const isBase64 = res.url.substring(0, commaIndex).includes('base64');
+              const array = isBase64 
+                ? base64ToUint8Array(dataPart)
+                : new TextEncoder().encode(decodeURIComponent(dataPart));
+              bytes = { data: array };
+            }
+          } catch (e) {
+            console.error('Failed to parse data URI', e);
+          }
         } else {
-          await downloadUrl(res.url, finalPath);
-          savedCount++;
+          bytes = await loadResourceBytesForTab(targetTabId, res.url);
         }
 
-        if (!settings.autoOpenShelf) {
+        if (bytes) {
+          if (zip) {
+            zip.file(finalPath, bytes.data);
+          } else {
+            await downloadBlob(
+              new Blob([bytes.data], { type: mimeTypeForDownload(res.url, res.type) }),
+              finalPath
+            );
+          }
+          savedCount++;
+        } else {
+          if (zip) {
+            failedCount++;
+          } else {
+            await downloadUrl(res.url, finalPath);
+            savedCount++;
+          }
+        }
+
+        if (!zip && !settings.autoOpenShelf) {
           chrome.downloads.setShelfEnabled(false);
         }
       } catch (e) {
@@ -309,11 +330,31 @@ const SidePanel = () => {
       setDownloadProgress(Math.round((processed / filtered.length) * 100));
     }
 
-    message.success(
-      failedCount
-        ? `Downloaded ${savedCount} files, ${failedCount} failed`
-        : `Downloaded ${savedCount} files`
-    );
+    if (zip) {
+      if (savedCount === 0) {
+        message.error('No files could be saved into the ZIP archive');
+      } else {
+        try {
+          message.info('Generating ZIP archive...');
+          const zipContent = await zip.generateAsync({ type: 'blob' });
+          await downloadBlob(zipContent, `${targetHost || 'resources'}.zip`);
+          message.success(
+            failedCount
+              ? `Successfully created ZIP with ${savedCount} files (${failedCount} failed/skipped)`
+              : `Successfully created ZIP with ${savedCount} files`
+          );
+        } catch (e) {
+          console.error('Failed to generate ZIP archive', e);
+          message.error('Failed to generate ZIP archive');
+        }
+      }
+    } else {
+      message.success(
+        failedCount
+          ? `Downloaded ${savedCount} files, ${failedCount} failed`
+          : `Downloaded ${savedCount} files`
+      );
+    }
     setIsDownloading(false);
   };
 
@@ -541,7 +582,7 @@ const SidePanel = () => {
               disabled={filteredResources.length === 0}
               className="rounded-xl h-14 font-bold bg-gradient-to-r from-blue-600 to-indigo-600 border-none shadow-xl shadow-blue-200"
             >
-              Download all ({filteredResources.length})
+              {isDownloading ? `Downloading... ${downloadProgress}%` : `Download all (${filteredResources.length})`}
             </Button>
             <Button
               icon={<ReloadOutlined />}
@@ -634,7 +675,7 @@ const SidePanel = () => {
           </div>
           {isDownloading && (
             <div className="p-3 bg-blue-50 border-t border-blue-100">
-              <Progress percent={downloadProgress} size="small" showInfo={false} strokeColor="#3b82f6" />
+              <Progress percent={downloadProgress} size="small" showInfo={true} strokeColor="#3b82f6" />
             </div>
           )}
         </div>
@@ -712,6 +753,9 @@ const SidePanel = () => {
             onClick={async () => {
               if (!selectedResource || !targetTabId) return;
               const resolved = resolveURLToPath(selectedResource.url, selectedResource.type);
+              
+              let finalPath = resolved.path;
+
               const bytes = await loadResourceBytesForTab(targetTabId, selectedResource.url);
               try {
                 if (bytes) {
@@ -719,10 +763,10 @@ const SidePanel = () => {
                     new Blob([bytes.data], {
                       type: mimeTypeForDownload(selectedResource.url, selectedResource.type),
                     }),
-                    resolved.path
+                    finalPath
                   );
                 } else {
-                  await downloadUrl(selectedResource.url, resolved.path);
+                  await downloadUrl(selectedResource.url, finalPath);
                 }
                 message.success('Download started');
               } catch {
@@ -780,14 +824,15 @@ const SidePanel = () => {
               onChange={(checked) => updateSettings({ autoOpenShelf: checked })}
             />
           </div>
+
           <div className="flex items-center justify-between">
             <Text strong className="text-xs block">
-              Group by file type
+              Save as ZIP
             </Text>
             <Switch
               size="small"
-              checked={settings.groupByType}
-              onChange={(checked) => updateSettings({ groupByType: checked })}
+              checked={settings.zipEnabled}
+              onChange={(checked) => updateSettings({ zipEnabled: checked })}
             />
           </div>
           <div className="flex items-center justify-between">

@@ -48,7 +48,9 @@ import {
 } from './lib/resource-status';
 import {
   loadResourceBytes,
+  loadResourceBytesForTab,
   decodeDevToolsContent,
+  base64ToUint8Array,
   uniquifyPath,
   downloadBlob,
   downloadUrl,
@@ -359,8 +361,32 @@ const DevToolsPanel = () => {
     async (res: Resource, zip: JSZip | null, usedPaths: Set<string>) => {
       const resolved = resolveURLToPath(res.url, res.type);
       const filePath = uniquifyPath(resolved.path, usedPaths);
-      const handler = contentHandlers.get(res.url);
-      const bytes = await loadResourceBytes(res.url, handler);
+
+      let bytes: { data: Uint8Array } | null = null;
+      if (res.url.startsWith('data:')) {
+        try {
+          const commaIndex = res.url.indexOf(',');
+          if (commaIndex !== -1) {
+            const dataPart = res.url.substring(commaIndex + 1);
+            const isBase64 = res.url.substring(0, commaIndex).includes('base64');
+            const array = isBase64 
+              ? base64ToUint8Array(dataPart)
+              : new TextEncoder().encode(decodeURIComponent(dataPart));
+            bytes = { data: array };
+          }
+        } catch (e) {
+          console.error('Failed to parse data URI', e);
+        }
+      } else {
+        const handler = contentHandlers.get(res.url);
+        bytes = await loadResourceBytes(res.url, handler);
+        if (!bytes) {
+          const tabId = chrome.devtools.inspectedWindow.tabId;
+          if (tabId) {
+            bytes = await loadResourceBytesForTab(tabId, res.url);
+          }
+        }
+      }
 
       if (bytes) {
         if (zip) {
@@ -645,7 +671,9 @@ const DevToolsPanel = () => {
                   onClick={handleDownloadAll}
                   className="bg-blue-600 shadow-sm flex items-center px-4"
                 >
-                  <span className="hidden sm:inline ml-1">Download All</span>
+                  <span className="hidden sm:inline ml-1">
+                    {isDownloading ? `Downloading... ${downloadProgress}%` : 'Download All'}
+                  </span>
                 </Button>
               </Space>
             </div>
